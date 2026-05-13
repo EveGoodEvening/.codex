@@ -1,0 +1,19 @@
+#https://developers.openai.com/codex/config-reference
+
+#model_provider = "my"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+network_access = true
+approval_policy = "never" # untrusted | on-request | never
+sandbox_mode = "danger-full-access" # read-only | workspace-write | danger-full-access
+
+[shell_environment_policy] 
+inherit = "all" 
+ignore_default_excludes = false
+
+[model_providers.my]
+name = "my"
+base_url = ""
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
