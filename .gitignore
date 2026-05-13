@@ -5,3 +5,7 @@
 !.gitignore
 !auth.json.template
 !config.toml.template
+!skills/
+!skills/*
+!skills/**
+skills/.system/
