@@ -1,0 +1,4 @@
+interface:
+  display_name: "Office Hours Lite"
+  short_description: "Pressure-test ideas before building"
+  default_prompt: "Use $office-hours-lite to pressure-test this idea and end with a concise design brief before any code is written."
