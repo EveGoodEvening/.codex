@@ -1,0 +1,4 @@
+interface:
+  display_name: "Advanced Planning"
+  short_description: "Resolve unknowns, compare options, and plan"
+  default_prompt: "Use $advanced-planning to study this codebase, resolve material open questions with me, compare viable approaches, and recommend the final implementation plan."

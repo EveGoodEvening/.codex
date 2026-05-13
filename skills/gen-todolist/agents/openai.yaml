@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate Todo List"
+  short_description: "Draft a resolved todo checklist"
+  default_prompt: "Use $gen-todolist to turn this resolved task or plan into a detailed todo checklist without adding open questions, and write it to a target planning document when needed."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simple Planning"
+  short_description: "Generate a scoped implementation plan"
+  default_prompt: "Use $simple-planning to inspect this codebase and draft a detailed plan for implementing a requested change."
