@@ -4,13 +4,18 @@
 model = "gpt-5.5"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
-network_access = true
 approval_policy = "never" # untrusted | on-request | never
 sandbox_mode = "danger-full-access" # read-only | workspace-write | danger-full-access
 
-[shell_environment_policy] 
+[shell_environment_policy]
 inherit = "all" 
 ignore_default_excludes = false
+
+[sandbox_workspace_write]
+network_access = true
+
+[analytics]
+enabled = false
 
 [model_providers.my]
 name = "my"
