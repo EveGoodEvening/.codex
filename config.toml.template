@@ -23,5 +23,7 @@ base_url = ""
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 
+[tui]
 status_line = ["model-with-reasoning", "fast-mode", "permissions", "context-used", "git-branch", "current-dir", "thread-title", "approval-mode", "context-window-size", "used-tokens", "total-input-tokens", "total-output-tokens", "thread-id"]
+status_line_use_colors = true
 
