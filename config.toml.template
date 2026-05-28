@@ -2,6 +2,7 @@
 
 #model_provider = "my"
 model = "gpt-5.5"
+plan_mode_reasoning_effort = "xhigh"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
 approval_policy = "never" # untrusted | on-request | never
