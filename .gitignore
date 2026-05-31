@@ -8,4 +8,7 @@
 !skills/
 !skills/*
 !skills/**
+!archive/
+!archive/skills/
+!archive/skills/**
 skills/.system/
