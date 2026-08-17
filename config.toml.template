@@ -1,7 +1,9 @@
 #https://developers.openai.com/codex/config-reference
 
-#model_provider = "my"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
 plan_mode_reasoning_effort = "xhigh"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
@@ -17,6 +19,8 @@ network_access = true
 
 [analytics]
 enabled = false
+
+#model_provider = "my"
 
 [model_providers.my]
 name = "my"
