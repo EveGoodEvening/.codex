@@ -10,6 +10,10 @@ model_reasoning_summary = "detailed"
 approval_policy = "never" # untrusted | on-request | never
 sandbox_mode = "danger-full-access" # read-only | workspace-write | danger-full-access
 
+[features]
+# Loads ~/.codex/hooks.json; review/trust the heavy-gate hook with /hooks once.
+hooks = true
+
 [shell_environment_policy]
 inherit = "all" 
 ignore_default_excludes = false
@@ -31,4 +35,3 @@ wire_api = "responses"
 [tui]
 status_line = ["model-with-reasoning", "fast-mode", "permissions", "context-used", "git-branch", "current-dir", "thread-title", "approval-mode", "context-window-size", "used-tokens", "total-input-tokens", "total-output-tokens", "thread-id"]
 status_line_use_colors = true
-

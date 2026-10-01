@@ -12,3 +12,11 @@
 !archive/skills/
 !archive/skills/**
 skills/.system/
+!AGENTS.md
+!hooks.json
+!bin/
+!bin/**
+!tests/
+!tests/**
+**/__pycache__/
+*.pyc

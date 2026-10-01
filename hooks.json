@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/bin/heavy-gate-hook",
+            "timeout": 10,
+            "statusMessage": "Checking browser memory gate"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Codex PreToolUse(Bash) hook: deny ungated browser launches.
+
+Detects, per simple command (after `cd`, env assignments, nohup/timeout/... wrappers):
+  - the Playwright CLI (`npx playwright test|screenshot|pdf|open|codegen|...`, `python -m playwright ...`)
+  - Chrome/Chromium, Firefox, or Electron
+  - node/deno/bun/tsx/python running a script file that imports playwright/puppeteer/selenium,
+    directly or through a local import (depth 2), or inline code / heredocs that do
+  - npm/pnpm/yarn/bun scripts (including npm pre/post lifecycle scripts) and executable launchers
+Only installed Codex/Claude/OMP gate paths are trusted; timeout must not wrap a gate.
+Codex normalizes exec_command to Bash with tool_input.command. Its hook cwd is
+the session cwd, so use explicit cd/absolute script paths for workdir overrides.
+Internal errors deny with Codex's supported PreToolUse JSON protocol. Static checking is not a sandbox.
+"""
+import json
+import os
+import re
+import shlex
+import sys
+
+GATE = "~/.codex/bin/heavy-gate"
+GATES = {os.path.realpath(os.path.expanduser(p)) for p in (GATE, "~/.claude/bin/heavy-gate", "~/.omp/bin/heavy-gate")}
+INDICATOR = re.compile(
+    r"""['"](?:playwright|playwright-core|playwright-chromium|@playwright/test|puppeteer|puppeteer-core)['"]"""
+    r"|\b(?:chromium|firefox|webkit|puppeteer)\.(?:launch|launchPersistentContext|launch_persistent_context|launchServer|connect)\b"
+    r"|\bfrom\s+playwright\b|\bimport\s+playwright\b|\bsync_playwright\b|\basync_playwright\b|\bpyppeteer\b|\bfrom\s+selenium\b|\bimport\s+selenium\b")
+LOCAL_IMPORT = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)['"](\.{1,2}/[^'"]+)['"]""")
+PW_LAUNCHING = {"test", "screenshot", "pdf", "open", "codegen", "cr", "ff", "wk", "show-trace"}
+PW_NAMES = {"playwright", "playwright-core", "@playwright/test"}
+BROWSERS = {"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "headless_shell",
+            "chrome-headless-shell", "firefox", "electron"}
+WRAPPERS = {"sudo", "nohup", "exec", "time", "nice", "ionice", "stdbuf", "setsid", "unbuffer", "command", "builtin"}
+SHELLS = {"bash", "sh", "zsh", "dash"}
+JS_RUNTIMES = {"node", "nodejs", "deno", "tsx", "ts-node", "bun"}
+OPERATORS = {";", "&&", "||", "|", "&", "(", ")", "|&", ";;", "\n"}
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+JS_EXT = ("", ".mjs", ".js", ".ts", ".mts", ".cjs", ".cts", "/index.mjs", "/index.js", "/index.ts")
+
+
+def read(path, limit=2_000_000):
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) <= limit:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read()
+    except OSError:
+        pass
+    return None
+
+
+def file_launches(path, depth=0, seen=None):
+    seen = seen if seen is not None else set()
+    real = os.path.realpath(path)
+    if real in seen or len(seen) > 40:
+        return None
+    seen.add(real)
+    text = read(real)
+    if text is None:
+        return None
+    if INDICATOR.search(text):
+        return path
+    if depth < 2 and not real.endswith(".py"):
+        base = os.path.dirname(real)
+        for rel in LOCAL_IMPORT.findall(text):
+            for ext in JS_EXT:
+                cand = os.path.normpath(os.path.join(base, rel + ext))
+                if os.path.isfile(cand):
+                    hit = file_launches(cand, depth + 1, seen)
+                    if hit:
+                        return f"{path} -> {hit}"
+                    break
+    return None
+
+
+def progname(word):
+    word = re.sub(r"(?<=.)@[^/]*$", "", word)  # drop an npx version suffix: playwright@1.63.0
+    return word if word.startswith("@") else os.path.basename(word)
+
+
+def split_commands(cmd):
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    cur = []
+    for tok in lex:
+        if tok in OPERATORS or set(tok) <= set(";&|()"):
+            if cur:
+                yield cur
+            cur = []
+        else:
+            cur.append(tok)
+    if cur:
+        yield cur
+
+
+def strip_prefix(words):
+    """Drop wrappers and assignments; retain whether a timeout limits this command."""
+    i = 0
+    timed = False
+    while i < len(words):
+        w = words[i]
+        b = os.path.basename(w)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w) or w == "$":
+            i += 1
+        elif b in WRAPPERS:
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in ("-n", "-u", "-g", "-c", "-s", "-a", "-o", "-e", "-i") else 1
+        elif b == "env":
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or "=" in words[i]):
+                i += 2 if words[i] in ("-u", "--unset", "-C", "--chdir") else 1
+        elif b == "timeout":
+            timed = True
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in ("-s", "-k", "--signal", "--kill-after") else 1
+            i += 1  # duration
+        elif b == "xvfb-run":
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 1
+        else:
+            break
+    return words[i:], timed
+
+
+class Checker:
+    def __init__(self):
+        self.heredocs = []
+
+    def path(self, p, cwd):
+        return os.path.normpath(os.path.join(cwd, os.path.expandvars(os.path.expanduser(p))))
+
+    def command_string(self, cmd, cwd, depth=0, timed=False):
+        if depth > 4:
+            return "command nesting exceeds the launch check limit; gate the outer command"
+        self.heredocs.extend(m.group(3) for m in HEREDOC.finditer(cmd))
+        cmd = HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0] + "\n", cmd)
+        cmd = cmd.replace("\\\n", " ").replace("\n", " ; ")
+        for words in split_commands(cmd):
+            words, has_timeout = strip_prefix(words)
+            if not words:
+                continue
+            prog = progname(words[0])
+            if prog == "cd":
+                target = words[1] if len(words) > 1 else "~"
+                if target != "-":
+                    cwd = self.path(target, cwd)
+                continue
+            if prog == "heavy-gate":
+                if os.path.realpath(self.path(words[0], cwd)) not in GATES:
+                    return "use the installed ~/.codex/bin/heavy-gate, not an unverified gate executable"
+                if words[1:] == ["--status"]:
+                    continue
+                if timed or has_timeout:
+                    return "timeout must not wrap heavy-gate; it may wait minutes for a slot"
+                continue
+            hit = self.simple(prog, words, cwd, depth, timed or has_timeout)
+            if hit:
+                return hit
+        return None
+
+    def simple(self, prog, words, cwd, depth, timed=False):
+        args = words[1:]
+        if prog in PW_NAMES or re.fullmatch(r"playwright@\S+", prog):
+            sub = next((a for a in args if not a.startswith("-")), None)
+            if sub in PW_LAUNCHING and not {"--list", "--help", "-h"} & set(args):
+                return f"`playwright {sub}` starts browsers"
+            return None
+        if prog in BROWSERS:
+            if not args or not set(args) <= {"--version", "--help", "-h"}:
+                return f"`{prog}` starts a browser/heavy application"
+            return None
+        if prog in SHELLS:
+            for i, a in enumerate(args[:-1]):
+                if a == "-c" or (a.startswith("-") and not a.startswith("--") and a.endswith("c")):
+                    return self.command_string(args[i + 1], cwd, depth + 1, timed)
+            script = next((a for a in args if not a.startswith("-")), None)
+            text = read(self.path(script, cwd)) if script else None
+            return self.command_string(text, cwd, depth + 1, timed) if text is not None else None
+        if prog in ("npx", "bunx", "pnpx"):
+            rest, i = list(args), 0
+            while i < len(rest) and rest[i].startswith("-"):
+                i += 2 if rest[i] in ("-p", "--package", "-c", "--call") else 1
+            if i < len(rest):
+                return self.simple(progname(rest[i]), rest[i:], cwd, depth, timed)
+            return None
+        if prog in ("npm", "pnpm", "yarn", "bun"):
+            return self.package_runner(prog, args, cwd, depth, timed)
+        if prog in JS_RUNTIMES or re.fullmatch(r"python[0-9.]*|pypy3?", prog):
+            return self.interpreter(prog, args, cwd)
+        # Project launchers need not spell out their interpreter in the command line.
+        text = read(self.path(words[0], cwd)) if "/" in words[0] else None
+        if text and text.startswith("#!"):
+            if INDICATOR.search(text):
+                return f"`{words[0]}` imports browser automation"
+            if re.search(r"\b(?:bash|sh|zsh|dash)\b", text.split("\n", 1)[0]):
+                return self.command_string(text, cwd, depth + 1, timed)
+        return None
+
+    def package_runner(self, prog, args, cwd, depth, timed):
+        pkg_dir, rest, i = cwd, [], 0
+        while i < len(args):
+            a = args[i]
+            if a in ("--prefix", "-C", "--dir", "--cwd") and i + 1 < len(args):
+                pkg_dir = self.path(args[i + 1], cwd)
+                i += 2
+                continue
+            if prog == "bun" and not rest and a in ("-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader"):
+                return self.interpreter(prog, args[i:], pkg_dir)
+            m = re.match(r"--(?:prefix|dir|cwd)=(.+)", a)
+            if m:
+                pkg_dir = self.path(m.group(1), cwd)
+            elif not a.startswith("-") or rest:
+                rest.append(a)
+            i += 1
+        if not rest:
+            return None
+        verb = rest[0]
+        if verb in ("exec", "x", "dlx") and len(rest) > 1:
+            tail = [a for a in rest[1:] if a != "--"]
+            return self.simple(progname(tail[0]), tail, pkg_dir, depth, timed) if tail else None
+        name = rest[1] if verb in ("run", "run-script", "rum", "urn") and len(rest) > 1 else verb
+        if verb in ("t", "tst"):
+            name = "test"
+        pkg = read(os.path.join(pkg_dir, "package.json"))
+        scripts = (json.loads(pkg).get("scripts") or {}) if pkg else {}
+        names = ["pre" + name, name, "post" + name] if prog == "npm" else [name]
+        for key in names:
+            if key in scripts:
+                hit = self.command_string(scripts[key], pkg_dir, depth + 1, timed)
+                if hit:
+                    return f"script `{key}` -> {hit}"
+        if name in scripts:
+            return None
+        if re.search(r"\.[cm]?[jt]s$", name):
+            return self.interpreter("node", [name], pkg_dir)
+        if prog in ("pnpm", "yarn", "bun") and verb not in ("run", "install", "add", "i", "test"):
+            if progname(rest[0]) == prog:
+                return None
+            return self.simple(progname(rest[0]), rest, pkg_dir, depth, timed)
+        return None
+
+    def interpreter(self, prog, args, cwd):
+        is_py = prog.startswith("py")
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if (is_py and a == "-c") or (not is_py and a in ("-e", "--eval", "-p", "--print")):
+                code = args[i + 1] if i + 1 < len(args) else ""
+                return f"inline {prog} code" if INDICATOR.search(code) else None
+            if is_py and a == "-m" and i + 1 < len(args):
+                mod = args[i + 1]
+                if mod == "playwright":
+                    sub = next((x for x in args[i + 2:] if not x.startswith("-")), None)
+                    if sub in PW_LAUNCHING and not {"--list", "--help", "-h"} & set(args):
+                        return f"`playwright {sub}` starts browsers"
+                return None
+            if a in ("-r", "--require", "--import", "--loader", "-W", "-X") and i + 1 < len(args):
+                if a in ("-r", "--require", "--import", "--loader"):
+                    hit = file_launches(self.path(args[i + 1], cwd))
+                    if hit:
+                        return f"{prog} preload uses a browser ({hit})"
+                i += 2
+                continue
+            if a == "-" or not a.startswith("-"):
+                break
+            i += 1
+        script = args[i] if i < len(args) else "-"
+        if prog == "deno" and script == "eval":
+            return "deno eval browser code" if any(INDICATOR.search(x) for x in args[i + 1:]) else None
+        if prog == "deno" and script in ("run", "test") and i + 1 < len(args):
+            script = next((x for x in args[i + 1:] if not x.startswith("-")), "-")
+        if prog == "bun" and script == "run" and i + 1 < len(args):
+            script = args[i + 1]
+        if script == "-" or script.startswith(("-", "<")):
+            return f"{prog} stdin/heredoc" if any(INDICATOR.search(h) for h in self.heredocs) else None
+        hit = file_launches(self.path(script, cwd))
+        if hit:
+            return f"`{script}` uses a browser ({hit})"
+        if any(INDICATOR.search(h) for h in self.heredocs):
+            return f"`{script}` runs next to a heredoc that uses a browser"
+        return None
+
+
+def decide(command, cwd):
+    return Checker().command_string(command, cwd)
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+        # Both shell and unified exec use this normalized field in Codex.
+        # A missing/changed protocol must not silently approve unchecked input.
+        if data.get("hook_event_name") != "PreToolUse" or data.get("tool_name") != "Bash":
+            raise ValueError("expected Codex PreToolUse(Bash) payload")
+        command = data["tool_input"]["command"]
+        if not isinstance(command, str):
+            raise ValueError("tool_input.command must be a string")
+        cwd = data.get("cwd") or os.getcwd()
+        why = decide(command, cwd)
+    except Exception as error:
+        why = f"launch check failed: {error}; refusing unchecked execution"
+    if not why:
+        return 0
+    reason = (
+        f"Blocked by heavy-gate: {why}. Browser and memory-heavy workloads share RAM across all projects, "
+        f"sessions and agents. Rerun through `{GATE} -l '<short label>' -- <command>` "
+        f"(put an explicit `cd /absolute/project`/env before the gate, or wrap a compound command in `bash -c`). "
+        f"Use Codex exec_command with a short yield_time_ms, then write_stdin to poll its session_id. "
+        f"The gate may wait minutes for a slot, so never wrap it in `timeout`. "
+        f"A command that starts N browsers takes `-n N` (max 2); prefer --workers=1 and close browsers in finally. "
+        f"Never disguise the launch to bypass this check. `{GATE} --status` shows the holders. See ~/.codex/AGENTS.md.")
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
