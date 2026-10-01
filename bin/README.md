@@ -27,6 +27,20 @@ do not override `HEAVY_GATE_*` for real workloads. When cancelling, stop only
 your own gate PID or its reported scope; never clear shared locks or kill
 another session's browser.
 
+If calling through `functions.exec`, await the tool call and use
+`functions.wait` only when that exec cell yields. Codex does not use Claude's
+`run_in_background` parameter. Avoid shell tools whose execution deadlines
+terminate queued work. When the hook rejects a launch, rerun it through the
+gate. If isolation is unavailable, stop the workload instead of running uncapped.
+
+Browser verification is one stage shared across projects, sessions, agents,
+and loops. Before fanning out, check `free -m` and gate status. Prefer serial
+verification or batches of at most two; give other workers static checks and
+unit tests. Include the gate policy in every browser-capable subagent's prompt.
+Launch one browser per process and close it in `finally`; do not add per-project
+locks. Slots remain held until all scope descendants exit. After SIGKILL,
+check for leftover processes belonging to your invocation.
+
 ## Activation
 
 `AGENTS.md` is the global instruction file. `hooks.json` registers the
@@ -56,6 +70,8 @@ Verified against installed `codex-cli 0.159.3`, source tag `rust-v0.159.3`
 - `write_stdin` does not invoke `PreToolUse` again. MCP/browser tools and
   dynamically constructed launches are not covered by this Bash matcher.
   The global instructions require these workloads to use the same gate.
+  Use a gated shell launcher when a tool cannot participate in the shared gate;
+  never launch a browser later through `write_stdin` into an ungated shell.
 - The checker is best-effort launch detection, not a security sandbox or a
   browser counter. It scans CLI commands, runtime scripts/local imports,
   inline code/heredocs, and package scripts. Browser counts must still be

@@ -1,12 +1,10 @@
-# Global Codex resource rules
+# Resource limits
 
-Memory is shared by every project, session and agent on this machine; one OOM can kill a whole session. Limit heavy work at launch time by concurrency and free memory, not by agent count.
+- Run every browser launch, Electron/emulator, and command expected to exceed ~2 GiB through `~/.codex/bin/heavy-gate [-n N] -- <cmd>`, regardless of tool or hook detection. `-n` counts concurrent browsers; **2 slots are shared machine-wide** with Claude/OMP.
+- Prefer serial browser verification and `--workers=1`; one browser per process, closed in `finally`. Keep browser batches ≤2 and include this policy in browser-capable subagents' prompts.
+- Use `exec_command` with a short `yield_time_ms`, then poll with `write_stdin`. Let the gate wait; never wrap it in `timeout`. Never bypass the hook or isolation, override `HEAVY_GATE_*` for real workloads, or add per-project locks.
+- For script/package launches, use explicit `cd /absolute/project &&` or absolute script paths so the hook resolves them correctly.
+- Before parallel heavy work, check `free -m` and `~/.codex/bin/heavy-gate --status`. Stop only your own scopes/processes; check for leftovers after SIGKILL.
+- Guard other shared resources (ports, GPU, dev servers) with a lock or check at use time.
 
-- Run heavy commands as `~/.codex/bin/heavy-gate [-n N] [-m 6G] [-l label] -- <cmd>`. Heavy means any browser launch (Playwright/Puppeteer/Selenium, screenshot/smoke/e2e scripts even with a project gate), Electron, emulators, or anything expected to exceed ~2 GiB. `-n` counts concurrent browsers; prefer one with `--workers=1` and serial browser verification.
-- The gate has **2 slots for the whole machine**, shared with Claude and OMP through `/tmp/heavy-gate`. It waits for capacity. Use `exec_command` with a short `yield_time_ms`, then poll the returned `session_id` with `write_stdin`; yielding does not terminate it. If calling through `functions.exec`, await the tool call and use `functions.wait` only for a yielded exec cell. Never wrap the gate in `timeout` or use a shell tool whose execution deadline kills queued work. Do not use Claude's `run_in_background` parameter in Codex.
-- Never change `HEAVY_GATE_*` settings to evade limits or use a separate lock directory. If systemd isolation is unavailable, stop the heavy workload; never run it uncapped. Gate regression tests may use isolated temporary lock directories and mock systemd commands.
-- The `PreToolUse` hook rejects recognized ungated launches. Rerun through the gate; never disguise a command or disable the hook to bypass it. Its checks are best-effort: the rule also covers launches through MCP/browser tools, interactive shells, and code it cannot inspect. Use a gated shell launcher when a tool cannot participate in the shared gate. Do not launch browsers later through `write_stdin` into an ungated shell.
-- For script/package launches, put `cd /absolute/project &&` in the command or use absolute script paths. Codex 0.159.3's hook sees the session cwd, not `exec_command.workdir`. One browser per process, closed in `finally`; no new per-project locks.
-- A slot stays held until every process in its scope exits. `heavy-gate --status` lists holders. Stop only your own scope/processes; after SIGKILL, check your leftover processes.
-- When orchestrating agents or loops, browser verification is one stage shared across sessions: serial preferred, batches of at most 2, never a wide parallel fan-out. Give other workers static checks/unit tests. Check `free -m` and gate status first; copy these rules into any browser-capable subagent's prompt.
-- Guard other shared resources (ports, GPU, shared dev servers) with a lock or check at use time. After gate/hook changes, run `python3 -m unittest discover -s ~/.codex/tests -p '*_test.py' -v`. See `~/.codex/bin/README.md` for activation and protocol details.
+Consult `~/.codex/bin/README.md` for setup, troubleshooting, or gate/hook changes; run its regression checks after changes.
