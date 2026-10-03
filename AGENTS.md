@@ -18,3 +18,8 @@
 - Guard other shared resources (ports, GPU, dev servers) with a lock or check at use time.
 
 Consult `~/.codex/bin/README.md` for setup, troubleshooting, or gate/hook changes; run its regression checks after changes.
+
+## Lessons
+
+- Codex has an independent `bin/heavy-gate` copy. Port containment fixes explicitly while keeping `/tmp/heavy-gate` locks shared with Claude/OMP; separate lock directories multiply the resource budget.
+- Chromium can move its own PID into a sibling systemd scope through the host session bus. `MemoryMax` follows cgroup ancestry, not process ancestry. Keep `dbus-run-session` inside the limited scope and the supervisor on the host bus; host session services are intentionally isolated, and this is not a sandbox against deliberate same-user/root escape.

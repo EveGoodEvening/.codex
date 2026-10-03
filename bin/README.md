@@ -1,6 +1,7 @@
 # Codex heavy-gate
 
 Ported from `/root/.claude` commits `4464b3e`, `fdc25eb`, and `cd9c4ed`.
+The session-bus containment fix is also ported from OMP commit `8e65ba5`.
 The gate keeps the same `/tmp/heavy-gate/slot-*` and `launch` locks as Claude/OMP:
 **two slots total across clients, projects, sessions, and agents**, not two per client.
 Prefer serial browser tests and `--workers=1`; reserve `-n 2` only for a command
@@ -10,8 +11,18 @@ policy's two-slot limit; it is not a strict one-browser global mutex.
 Each launch requires at least 4500 MiB `MemAvailable`, is spaced by 20 seconds,
 and runs in a user systemd scope with `MemoryMax=6G` and `MemorySwapMax=0` by
 default. The gate keeps its slots until the scope and its descendants exit.
-Unavailable systemd isolation refuses execution. This requires Linux, Bash,
-`flock`, Python 3, and a working user systemd manager with memory controllers.
+Unavailable systemd or session-bus isolation refuses execution. This requires
+Linux, Bash, `flock`, Python 3, `dbus-run-session`/`dbus-daemon`, and a working
+user systemd manager with memory controllers.
+
+The payload runs under `dbus-run-session` inside the limited scope. Its private
+session bus prevents Chromium from asking host user systemd to move it into an
+uncapped sibling scope. The supervisor retains the host bus for scope cleanup.
+Host session D-Bus services are intentionally not inherited; invoke the gate
+from the normal host session, not from another gate's isolated payload. This
+blocks automatic Chromium migration, not deliberate same-user/root escape.
+The per-command caps and launch-time memory check are not a machine-wide
+aggregate memory budget.
 
 ## Use
 
@@ -90,11 +101,19 @@ Source checked: [exec command hook payload](https://github.com/openai/codex/blob
 
 ```sh
 python3 -m unittest discover -s ~/.codex/tests -p '*_test.py' -v
-bash -n ~/.codex/bin/heavy-gate
+~/.codex/bin/heavy-gate -l gate-syntax -- bash -n ~/.codex/bin/heavy-gate
+
+# Opt-in: real user systemd and the machine's shared slots.
+HEAVY_GATE_INTEGRATION=1 python3 -m unittest discover -s ~/.codex/tests -p 'heavy_gate_runtime_test.py' -v
 ```
 
-Tests use temporary lock directories and fake systemd commands; they do not
-launch browsers or alter the machine's shared limits. They cover detection,
-Codex payload/denial compatibility, admission, isolation failures, scope exit
-status, descendant ownership, and cleanup. Real cgroup verification can run a
-small command through the gate; never allocate gigabytes just to test OOM.
+Default unit tests use temporary lock directories and fake systemd commands;
+they do not launch browsers or alter the machine's shared limits. They cover
+detection, Codex payload/denial compatibility, admission, missing isolation
+dependencies, scope exit status, descendant ownership, and cleanup.
+
+The opt-in regression replays Chromium's `StartTransientUnit` request with a
+low-memory process through the installed gate. It verifies that migration is
+denied and the process stays in the capped, swap-disabled cgroup. It uses real
+shared slots without a browser or memory pressure; allow it and the gated syntax
+check to wait for capacity, never wrap them in `timeout`.

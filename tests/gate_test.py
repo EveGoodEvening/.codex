@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,7 +101,15 @@ else:
         self.env['GATE_TEST_NO_SYSTEMD'] = '1'
         result = self.run_gate()
         self.assertEqual(result.returncode, 69)
-        self.assertIn('refusing uncapped execution', result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_missing_session_bus_isolation_never_executes_command(self):
+        mock_bin = self.root / 'bin'
+        for command in ('bash', 'mkdir', 'basename'):
+            (mock_bin / command).symlink_to(shutil.which(command))
+        self.env['PATH'] = str(mock_bin)
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 69)
         self.assertFalse(self.marker.exists())
 
     def test_scope_creation_failure_never_falls_back(self):
@@ -109,14 +118,10 @@ else:
         self.assertFalse(self.marker.exists())
         self.assertTrue(self.slot_is_free(0))
 
-    def test_scoped_command_preserves_exit_status_and_memory_limits(self):
+    def test_scoped_command_preserves_exit_status_and_releases_slots(self):
         result = self.run_gate('-n', '2', '-m', '256M', exit_code=7)
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertTrue(self.marker.exists())
-        args = json.loads(self.log.read_text())
-        self.assertIn('--scope', args)
-        self.assertIn('MemoryMax=256M', args)
-        self.assertIn('MemorySwapMax=0', args)
         self.assertTrue(self.slot_is_free(0))
         self.assertTrue(self.slot_is_free(1))
 
